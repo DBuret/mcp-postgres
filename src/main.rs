@@ -157,13 +157,24 @@ fn handle_list_tools() -> Value {
     json!({ "tools": [
         {
             "name": "sql_read_query",
-            "description": "Execute a read-only SELECT query on the pAItrimony PostgreSQL database. Returns a JSON array. Only SELECT and WITH...SELECT are allowed.",
+            "description": "Query the pAItrimony financial database. \
+                Use this tool to answer any question about the user's investment portfolio: \
+                account balances, holdings, historical stock prices (OHLCV), \
+                technical indicators (RSI, SMA, Bollinger Bands), or news sentiment scores. \
+                Input must be a valid SELECT query. \
+                The database schema is: \
+                accounts(id, name, type[PEA|CTO|CRYPTO|SCPI], currency); \
+                holdings(id, account_id, ticker, quantity, avg_price); \
+                assets(ticker, name, type[STOCK|ETF|CRYPTO], sector, industry); \
+                quotes(ticker, date, open, high, low, close, volume); \
+                signals(ticker, date, rsi_14, sma_50, sma_200, bb_upper, bb_lower, atr_14, rvol); \
+                news(id, ticker, date, title, url, summary, sentiment_score[-1..1]).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "sql": {
                         "type": "string",
-                        "description": "A valid SELECT or WITH...SELECT SQL query"
+                        "description": "A valid SELECT or WITH...SELECT SQL query against the schema above."
                     }
                 },
                 "required": ["sql"]
@@ -171,18 +182,21 @@ fn handle_list_tools() -> Value {
         },
         {
             "name": "list_tables",
-            "description": "List all tables in the pAItrimony database (public schema).",
+            "description": "List all tables available in the financial database. \
+                Call this first if you are unsure which tables exist.",
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
         },
         {
             "name": "describe_table",
-            "description": "Get column definitions (name, type, nullable, default) for a given table.",
+            "description": "Get the column definitions of a specific table in the financial database. \
+                Use this before writing a sql_read_query if you need to know \
+                the exact column names and types of a table.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "table": {
                         "type": "string",
-                        "description": "Table name (e.g. 'quotes', 'holdings', 'signals')"
+                        "description": "Table name (e.g. 'quotes', 'holdings', 'signals', 'news')"
                     }
                 },
                 "required": ["table"]
@@ -190,18 +204,31 @@ fn handle_list_tools() -> Value {
         },
         {
             "name": "portfolio_performance",
-            "description": "Returns current holdings with unrealized P&L, current value, and cost basis per account. Uses latest available quote for each ticker.",
+            "description": "Returns the current state of the user's investment portfolio: \
+                all positions across all accounts (PEA, CTO, Crypto, SCPI) \
+                with current market value, cost basis, unrealized profit/loss in currency and percentage. \
+                Use this to answer questions like: \
+                'How is my portfolio doing?', \
+                'What are my best/worst performing positions?', \
+                'What is my total portfolio value?'",
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
         },
         {
             "name": "at_risk_positions",
-            "description": "Returns positions flagged as at-risk: drawdown below threshold OR 7-day average news sentiment < -0.5. Also returns RSI and moving averages for context.",
+            "description": "Returns positions that are currently at risk, defined as: \
+                a loss exceeding the drawdown threshold (default: -10%) \
+                OR a negative average news sentiment over the last 7 days (below -0.5). \
+                Also returns RSI and moving averages (SMA50, SMA200) for each flagged position. \
+                Use this to answer questions like: \
+                'What positions should I be worried about?', \
+                'Are there any alerts in my portfolio?', \
+                'Which stocks have bad news sentiment?'",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "drawdown_threshold": {
                         "type": "number",
-                        "description": "Loss percentage threshold (default: 10.0 → flags positions down more than 10%)"
+                        "description": "Loss percentage threshold (default: 10.0 — flags positions down more than 10%)"
                     }
                 },
                 "required": []
@@ -209,12 +236,14 @@ fn handle_list_tools() -> Value {
         },
         {
             "name": "sector_exposure",
-            "description": "Returns portfolio allocation by sector: number of positions, total value, and percentage of portfolio. Useful for concentration and rebalancing analysis.",
+            "description": "Returns the user's portfolio allocation broken down by market sector \
+                (Technology, Finance, Energy, etc.): number of positions per sector, \
+                total invested value, and percentage of the total portfolio. \
+                Use this to answer questions like: \
+                'Am I too exposed to Tech?', \
+                'What is my sector diversification?', \
+                'Should I rebalance my portfolio?'",
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
         }
     ]})
-}
-
-fn json_error(msg: &str) -> Value {
-    json!({ "isError": true, "content": [{ "type": "text", "text": msg }] })
 }

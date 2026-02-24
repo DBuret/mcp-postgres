@@ -1,0 +1,258 @@
+= MCP PostgreSQL Rust Bridge
+v0.1.0
+:description: A high-performance, network-ready MCP server bridge for PostgreSQL with read-only access and financial analytics tools.
+:icons: font
+:toc: macro
+:toc-title: Table of Contents
+:imagesdir: images
+:sectnums:
+
+image:https://img.shields.io/badge/Rust-2024-orange.svg[Rust Version]
+image:https://img.shields.io/badge/Docker-davidburet-blue.svg[Docker Hub]
+image:https://img.shields.io/badge/Data-PostgreSQL-336791[Database]
+image:https://img.shields.io/badge/Status-Concept-orange[Status]
+image:https://img.shields.io/badge/License-MIT-blue.svg[License]
+
+[cols="2,10",frame=none]
+|===
+|image:logo-128.png[logo]
+|An implementation of the **Model Context Protocol (MCP)** that gives AI agents read-only access to a PostgreSQL database, with built-in financial analytics tools. Built with Rust for speed, reliability & minimal footprint.
+
+Unlike standard MCP servers using `stdio`, this bridge operates over **SSE (Server-Sent Events)** with a **Hybrid Response** mode, making it compatible with local clients like LM Studio.
+|===
+
+toc::[]
+
+NOTE: This project is a **gateway only** and does **not** include https://www.postgresql.org/[PostgreSQL]. You must deploy and configure your own PostgreSQL instance separately.
+
+WARNING: Read-only enforcement relies on **both** an application-level prefix check
+**and** a dedicated read-only PostgreSQL role. The application guard alone is
+insufficient — see the <<security,Security>> section.
+
+== Features
+
+* **6 Tools**: 3 generic SQL tools + 3 financial analytics tools.
+* **Read-Only by Design**: Application-level prefix guard (`SELECT`/`WITH` only) plus
+  PostgreSQL role with no DML/DDL privileges. Defence in depth per ADR-001.
+* **Network-Ready**: Connect via SSE/HTTP; no local child-process management required.
+* **LM Studio Optimized**: Specialized "Hybrid Handshake" to prevent connection timeouts.
+* **Modern Rust**: Leveraging Edition 2024 and the Axum/Tokio/sqlx ecosystem.
+* **Docker Optimized**: Multi-stage builds with `FROM scratch` for a tiny footprint (~6MB).
+
+== Tools
+
+[cols="1,1,3"]
+|===
+| Tool | Type | Description
+
+| `sql_read_query`
+| Generic
+| Execute a `SELECT` query. Queries not starting with `SELECT` are rejected
+  with a clear error. `WITH` prefix is accepted but see security notes below.
+  Returns a JSON array (max 500 rows).
+
+| `list_tables`
+| Generic
+| List all tables in the `public` schema with their type.
+
+| `describe_table`
+| Generic
+| Get column definitions (name, type, nullable, default) for a given table.
+
+| `portfolio_performance`
+| Financial
+| Returns all holdings with unrealized P&L, current value, and cost basis per account,
+  using the latest available quote.
+
+| `at_risk_positions`
+| Financial
+| Returns positions flagged as at-risk: drawdown below a configurable threshold
+  (default 10%) OR 7-day average news sentiment < -0.5.
+  Includes RSI and moving averages.
+
+| `sector_exposure`
+| Financial
+| Returns portfolio allocation by sector: number of positions, total value,
+  and percentage. Useful for concentration and rebalancing analysis.
+|===
+
+[[security]]
+== Security
+
+Read-only protection is implemented at **two levels** — both are required:
+
+=== Level 1 — Application guard (this bridge)
+`sql_read_query` rejects any query not starting with `SELECT`.
+Queries starting with `WITH` are accepted (needed for complex analytics),
+but PostgreSQL's writable CTEs mean a `WITH ... DELETE/INSERT ... SELECT`
+could pass this check.
+
+*This guard provides user-friendly error messages, not a security boundary.*
+
+=== Level 2 — PostgreSQL read-only role (required)
+Create a dedicated role with no DML or DDL privileges:
+
+[source,sql]
+----
+CREATE ROLE mcp_ro LOGIN PASSWORD 'your_password';
+GRANT CONNECT ON DATABASE paitrimony TO mcp_ro;
+GRANT USAGE ON SCHEMA public TO mcp_ro;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO mcp_ro;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO mcp_ro;
+
+-- Belt and suspenders: block writes even if privileges are misconfigured
+ALTER ROLE mcp_ro SET default_transaction_read_only = on;
+----
+
+Set `MCP_PG_DATABASE_URL` to use `mcp_ro`. At that point, any write attempt
+— including writable CTEs — will be rejected by PostgreSQL itself with
+`ERROR: cannot execute DELETE in a read-only transaction`.
+
+== Deployment Options
+
+=== Using the DockerHub Image (Fastest)
+[source,bash]
+----
+docker run -d \
+  --name mcp-postgres \
+  -p 3005:3005 \
+  -e MCP_PG_DATABASE_URL="postgresql://mcp_ro:pass@your-postgres-ip:5432/paitrimony" \
+  -e MCP_PG_PORT="3005" \
+  -e MCP_PG_LOG="info" \
+  davidburet/mcp-postgres:0.1.0
+----
+
+=== Nomad Job (pAItrimony NAS deployment)
+[source,hcl]
+----
+job "mcp-postgres" {
+  datacenters = ["home"]
+  type        = "service"
+
+  group "mcp" {
+    count = 1
+
+    network {
+      port "http" {
+        static = 3005
+      }
+    }
+
+    task "mcp-postgres" {
+      driver = "docker"
+
+      config {
+        image = "davidburet/mcp-postgres:0.1.0"
+        ports = ["http"]
+      }
+
+      env {
+        MCP_PG_DATABASE_URL = "postgresql://mcp_ro:${MCP_RO_PASSWORD}@${POSTGRES_HOST}:5432/paitrimony"
+        MCP_PG_PORT         = "3005"
+        MCP_PG_LOG          = "info"
+      }
+
+      resources {
+        cpu    = 100
+        memory = 32
+      }
+
+      service {
+        name = "mcp-postgres"
+        port = "http"
+
+        check {
+          type     = "http"
+          path     = "/health"
+          interval = "30s"
+          timeout  = "5s"
+        }
+      }
+    }
+  }
+}
+----
+
+=== Building
+
+[source,bash]
+----
+# Verify compilation locally before the Docker multi-stage build
+cargo check && docker build -t mcp-postgres .
+----
+
+=== Native Binary Build
+Requires Rust 1.88+ (Edition 2024).
+[source,bash]
+----
+cargo build --release
+export MCP_PG_DATABASE_URL="postgresql://mcp_ro:pass@localhost:5432/paitrimony"
+./target/release/mcp-postgres
+----
+
+== Configuration
+
+Environment variables (prefixed with `MCP_PG_`):
+
+[cols="1,2,1"]
+|===
+| Variable | Description | Default
+
+| `MCP_PG_DATABASE_URL`
+| PostgreSQL connection string — use the `mcp_ro` read-only role
+| `postgresql://postgres:postgres@172.17.0.1:5432/paitrimony`
+
+| `MCP_PG_PORT`
+| Port the bridge will listen on
+| `3005`
+
+| `MCP_PG_LOG`
+| Log level (`debug`, `info`, `warn`, `error`)
+| `info`
+|===
+
+== Connecting to LM Studio
+
+Tested with https://lmstudio.ai[LMStudio] version 0.4.2+.
+
+* **Location**:
+** Windows: `%APPDATA%\LM Studio\mcp.json`
+** macOS: `~/Library/Application Support/LM Studio/mcp.json`
+** Linux: `~/.config/lmstudio/mcp.json`
+
+* **Configuration**:
+[source,json]
+----
+{
+  "mcpServers": {
+    "postgres": {
+      "url": "http://YOUR_NAS_IP:3005/sse"
+    }
+  }
+}
+----
+
+TIP: This bridge uses a **Hybrid Initialize** response. It returns the handshake
+directly via HTTP POST to avoid the 60s timeout often encountered with LM Studio's
+SSE implementation.
+
+== Known Limitations
+
+* **Broadcast Channel**: Responses are broadcasted to all active SSE subscribers.
+  Ideal for private/single-user use.
+* **No auth on the bridge**: Keep port 3005 behind a trusted LAN or VPN.
+  Never expose it to the internet (ADR-001).
+* **`WITH` prefix accepted**: Writable CTEs (`WITH ... DELETE ... SELECT`) pass
+  the application-level guard. Mitigated entirely by the `mcp_ro` read-only role.
+* **pgvector / RAG**: Vector similarity search is handled by the dedicated `mcp-rag`
+  bridge, not this one.
+* **500 row limit**: All queries are capped at 500 rows. Use `sql_read_query` with
+  explicit `LIMIT` and `OFFSET` for pagination.
+
+== License
+
+MIT License. See `LICENSE` for details. **Note:** Mentioning the author in credits
+is required for any redistribution.
+
+---
+Created by DBuret. Part of the https://gitlab.com/dburet/pAItrimony[pAItrimony] services suite.

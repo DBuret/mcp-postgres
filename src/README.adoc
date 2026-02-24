@@ -1,0 +1,180 @@
+= mcp-postgres — Internal Architecture
+:icons: font
+:toc: macro
+:toc-title: Table of Contents
+:sectnums:
+
+toc::[]
+
+This document describes the internal structure of `mcp-postgres` for contributors and maintainers.
+It is intentionally kept close to the source code.
+
+== Overview
+
+`mcp-postgres` follows the same architectural pattern as the other bridges in the pAItrimony suite
+(`mcp-searxng`, `mcp-kroki`): a minimal Axum/Tokio HTTP server exposing the
+https://modelcontextprotocol.io/[Model Context Protocol] over **SSE (Server-Sent Events)**.
+
+The codebase is deliberately small and flat. There is no framework abstraction, no dependency injection
+container, no ORM. Each file has a single, explicit responsibility.
+
+== File Structure
+
+[source]
+----
+src/
+├── main.rs              # Entry point, HTTP router, MCP dispatch
+├── state.rs             # Shared application state (PgPool + SSE broadcast channel)
+├── error.rs             # Unified error type (BridgeError)
+├── mcp.rs               # MCP protocol structs (McpRequest / McpResponse)
+└── handlers/
+    ├── mod.rs           # Module declaration
+    └── queries.rs       # All tool implementations (generic + financial)
+----
+
+== Module Descriptions
+
+=== `main.rs`
+Entry point and nerve center of the bridge.
+
+* Initialises `tracing` logging (level controlled via `MCP_PG_LOG`).
+* Builds the `AppState` (async, connects the PgPool).
+* Mounts three routes:
+** `GET /health` — liveness probe for Nomad service checks.
+** `GET /sse` — opens the Server-Sent Events tunnel (long-lived connection).
+** `POST /sse` and `POST /messages` — receives MCP JSON-RPC requests from the client.
+* Implements the **Hybrid Initialize** strategy: the `initialize` handshake is answered
+  directly via HTTP 200 (not via SSE) to avoid LM Studio's 60s connection timeout.
+* All other tool calls are processed in a `tokio::spawn` task and delivered asynchronously
+  via the SSE broadcast channel, with up to 3 retries spaced 100ms apart.
+
+=== `state.rs`
+Holds the two shared resources injected into every handler via `Arc<AppState>`:
+
+* `pool: sqlx::PgPool` — async PostgreSQL connection pool.
+  Connection string read from `MCP_PG_DATABASE_URL`.
+* `tx: broadcast::Sender<String>` — Tokio broadcast channel for pushing
+  JSON-RPC responses to all active SSE subscribers.
+
+`AppState::init()` is `async` (unlike the `reqwest::Client` in `mcp-searxng`)
+because `PgPool::connect()` performs a real connection at startup.
+
+=== `error.rs`
+Defines `BridgeError`, a `thiserror`-derived enum with two variants:
+
+* `Database(sqlx::Error)` — wraps any driver-level error (connection, query, type mapping).
+* `Api(String)` — used for application-level rejections (unknown tool, invalid argument,
+  read-only violation, invalid table name).
+
+Both variants implement `IntoResponse`, returning HTTP 500 with the error message as plain text.
+This keeps error handling uniform across all tool handlers.
+
+=== `mcp.rs`
+Minimal, protocol-level structs:
+
+* `McpRequest` — deserialises the incoming JSON-RPC envelope
+  (`jsonrpc`, `id`, `method`, `params`).
+* `McpResponse` — serialises the outgoing envelope
+  (`jsonrpc`, `id`, `result`).
+
+No business logic here. Kept separate to make protocol evolution easy to spot.
+
+=== `handlers/queries.rs`
+All tool implementations live here, split into two groups.
+
+==== Generic tools
+[cols="1,3"]
+|===
+| Function | Role
+
+| `sql_read_query`
+| Wraps the user SQL in `SELECT row_to_json(q) FROM (...) q LIMIT 500`
+  and returns a pretty-printed JSON array.
+  Rejects anything that does not start with `SELECT` or `WITH`.
+
+| `list_tables`
+| Queries `information_schema.tables` for all `public` schema tables.
+
+| `describe_table`
+| Queries `information_schema.columns` for a given table.
+  Table name is validated (alphanumeric + underscore only) before use
+  to prevent injection via the `information_schema` path.
+|===
+
+==== Financial tools
+[cols="1,3"]
+|===
+| Function | Role
+
+| `portfolio_performance`
+| Joins `holdings → accounts → assets → quotes` (LATERAL, latest quote per ticker).
+  Returns unrealized P&L, current value, cost basis, and P&L % per position.
+
+| `at_risk_positions`
+| Same join pattern, extended with a LATERAL on `news` (7-day sentiment average)
+  and `signals` (latest RSI, SMA50, SMA200).
+  Filters on `drawdown_pct < -threshold OR avg_sentiment < -0.5`.
+  The threshold is a validated `f64` parameter (default: 10.0).
+
+| `sector_exposure`
+| Aggregates holdings by `assets.sector` using a window function to compute
+  `allocation_pct` as a share of total portfolio value.
+|===
+
+==== `query_to_json` (private helper)
+All financial tools delegate to this internal function to avoid duplicating
+the `row_to_json` wrapping and the 500-row truncation logic.
+
+== Data Flow
+
+[plantuml]
+----
+@startuml
+
+!theme plain
+skinparam sequenceArrowThickness 2
+
+actor       "LM Studio\n(Desktop)"   as LMS
+participant "messages_handler()\nmain.rs" as MH
+participant "tokio::spawn\n(async task)" as TS
+participant "queries.rs\nhandler"    as QH
+database    "PostgreSQL\n(NAS)"      as PG
+participant "broadcast::Sender\n(SSE channel)" as SSE
+actor       "GET /sse\ntunnel"       as SSET
+
+== Initialization (direct HTTP) ==
+LMS -> MH  : POST /sse\n{"method": "initialize"}
+MH  -> LMS : HTTP 200\nMcpResponse (direct)
+
+== Tool Call (async via SSE) ==
+LMS -> MH  : POST /sse\n{"method": "tools/call",\n"name": "at_risk_positions"}
+MH  -> TS  : tokio::spawn
+MH  -> LMS : HTTP 202 Accepted
+
+TS  -> QH  : at_risk_positions(&state, 10.0)
+QH  -> PG  : SELECT ... FROM holdings\nJOIN quotes, news, signals
+PG  -> QH  : rows
+QH  -> TS  : Ok(json_string)
+TS  -> SSE : broadcast::send(McpResponse)
+SSE -> SSET: SSE event
+SSET-> LMS : McpResponse\n(JSON-RPC result)
+@enduml
+----
+
+
+== Design Decisions
+
+* **No sqlx macros (`query!`)**: We use `sqlx::query` with runtime strings.
+  This avoids the need for `SQLX_OFFLINE=true` and a `.sqlx/` snapshot directory
+  in the Docker build context. The trade-off (no compile-time query verification)
+  is acceptable here because the financial queries are integration-tested against
+  a real schema, and the generic `sql_read_query` tool is inherently dynamic.
+
+* **`row_to_json` delegation**: PostgreSQL handles result serialisation natively.
+  This removes the need to map column types to Rust structs for every query,
+  keeping the handler code minimal.
+
+* **Read-only enforcement in Rust, not in PostgreSQL**: The `is_read_only()` guard
+  in `sql_read_query` rejects writes at the application layer, providing a clear
+  error message to the LLM. The database user should *also* be a read-only role
+  in production (defence in depth, ADR-001).

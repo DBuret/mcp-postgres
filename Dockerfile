@@ -1,5 +1,5 @@
 # --- Étape 1 : Build ---
-FROM rust:1.85-slim AS builder
+FROM rust:1.88-slim AS builder
 
 RUN apt-get update && apt-get install -y \
     musl-tools \
@@ -36,7 +36,7 @@ COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/mcp-postgres /
 
 # Variables d'environnement par défaut
 ENV MCP_PG_DATABASE_URL="postgresql://postgres:postgres@172.17.0.1:5432/paitrimony"
-ENV MCP_PG_PORT="3001"
+ENV MCP_PG_PORT="3005"
 ENV MCP_PG_LOG="info"
 
 WORKDIR /app

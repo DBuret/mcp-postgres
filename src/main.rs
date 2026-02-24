@@ -18,7 +18,10 @@ use tower_http::trace::TraceLayer;
 use serde_json::{json, Value};
 use crate::state::AppState;
 use crate::mcp::{McpRequest, McpResponse};
-use crate::handlers::queries::{sql_read_query, list_tables, describe_table};
+use crate::handlers::queries::{
+    sql_read_query, list_tables, describe_table,
+    portfolio_performance, at_risk_positions, sector_exposure,
+};
 
 #[tokio::main]
 async fn main() {
@@ -46,7 +49,9 @@ async fn main() {
     axum::serve(listener, app).await.unwrap();
 }
 
-async fn sse_handler(State(state): State<Arc<AppState>>) -> Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>> {
+async fn sse_handler(
+    State(state): State<Arc<AppState>>,
+) -> Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>> {
     let rx = state.tx.subscribe();
     let stream = stream::unfold(rx, |mut rx| async move {
         match rx.recv().await {
@@ -74,7 +79,9 @@ async fn messages_handler(
     }
 
     tokio::spawn(async move {
-        if request_id.is_null() && method != "notifications/initialized" { return; }
+        if request_id.is_null() && method != "notifications/initialized" {
+            return;
+        }
 
         let result = match method.as_str() {
             "tools/list" => handle_list_tools(),
@@ -83,6 +90,7 @@ async fn messages_handler(
                     .and_then(|p| p.get("name")?.as_str())
                     .unwrap_or("");
                 let args = payload.params.as_ref().and_then(|p| p.get("arguments"));
+
                 let res = match tool_name {
                     "sql_read_query" => {
                         let sql = args.and_then(|a| a.get("sql")?.as_str()).unwrap_or("");
@@ -93,8 +101,19 @@ async fn messages_handler(
                         let table = args.and_then(|a| a.get("table")?.as_str()).unwrap_or("");
                         describe_table(&state, table).await
                     }
-                    _ => Err(crate::error::BridgeError::Api(format!("Unknown tool: {tool_name}"))),
+                    "portfolio_performance" => portfolio_performance(&state).await,
+                    "sector_exposure" => sector_exposure(&state).await,
+                    "at_risk_positions" => {
+                        let threshold = args
+                            .and_then(|a| a.get("drawdown_threshold")?.as_f64())
+                            .unwrap_or(10.0);
+                        at_risk_positions(&state, threshold).await
+                    }
+                    _ => Err(crate::error::BridgeError::Api(
+                        format!("Unknown tool: {tool_name}")
+                    )),
                 };
+
                 match res {
                     Ok(t) => json!({ "content": [{ "type": "text", "text": t }] }),
                     Err(e) => {
@@ -111,7 +130,10 @@ async fn messages_handler(
         if let Ok(json_msg) = serde_json::to_string(&response) {
             let mut delivered = false;
             for _ in 0..3 {
-                if tx.send(json_msg.clone()).is_ok() { delivered = true; break; }
+                if tx.send(json_msg.clone()).is_ok() {
+                    delivered = true;
+                    break;
+                }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
             if !delivered {
@@ -127,7 +149,7 @@ fn handle_initialize() -> Value {
     json!({
         "protocolVersion": "2024-11-05",
         "capabilities": { "tools": { "listChanged": false } },
-        "serverInfo": { "name": "mcp-postgres-bridge", "version": "0.1.0" }
+        "serverInfo": { "name": "mcp-postgres", "version": "0.1.0" }
     })
 }
 
@@ -138,7 +160,12 @@ fn handle_list_tools() -> Value {
             "description": "Execute a read-only SELECT query on the pAItrimony PostgreSQL database. Returns a JSON array. Only SELECT and WITH...SELECT are allowed.",
             "inputSchema": {
                 "type": "object",
-                "properties": { "sql": { "type": "string", "description": "A valid SELECT or WITH...SELECT SQL query" } },
+                "properties": {
+                    "sql": {
+                        "type": "string",
+                        "description": "A valid SELECT or WITH...SELECT SQL query"
+                    }
+                },
                 "required": ["sql"]
             }
         },
@@ -152,9 +179,38 @@ fn handle_list_tools() -> Value {
             "description": "Get column definitions (name, type, nullable, default) for a given table.",
             "inputSchema": {
                 "type": "object",
-                "properties": { "table": { "type": "string", "description": "Table name (e.g. 'quotes', 'holdings')" } },
+                "properties": {
+                    "table": {
+                        "type": "string",
+                        "description": "Table name (e.g. 'quotes', 'holdings', 'signals')"
+                    }
+                },
                 "required": ["table"]
             }
+        },
+        {
+            "name": "portfolio_performance",
+            "description": "Returns current holdings with unrealized P&L, current value, and cost basis per account. Uses latest available quote for each ticker.",
+            "inputSchema": { "type": "object", "properties": {}, "required": [] }
+        },
+        {
+            "name": "at_risk_positions",
+            "description": "Returns positions flagged as at-risk: drawdown below threshold OR 7-day average news sentiment < -0.5. Also returns RSI and moving averages for context.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "drawdown_threshold": {
+                        "type": "number",
+                        "description": "Loss percentage threshold (default: 10.0 → flags positions down more than 10%)"
+                    }
+                },
+                "required": []
+            }
+        },
+        {
+            "name": "sector_exposure",
+            "description": "Returns portfolio allocation by sector: number of positions, total value, and percentage of portfolio. Useful for concentration and rebalancing analysis.",
+            "inputSchema": { "type": "object", "properties": {}, "required": [] }
         }
     ]})
 }

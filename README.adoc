@@ -7,8 +7,10 @@ v0.1.0
 :imagesdir: images
 :sectnums:
 
+
+image:https://img.shields.io/docker/v/davidburet/mcp-postgres[Version]
+image:https://img.shields.io/docker/image-size/davidburet/mcp-postgres/latest[Size]
 image:https://img.shields.io/badge/Rust-2024-orange.svg[Rust Version]
-image:https://img.shields.io/badge/Docker-davidburet-blue.svg[Docker Hub]
 image:https://img.shields.io/badge/Data-PostgreSQL-336791[Database]
 image:https://img.shields.io/badge/Status-Concept-orange[Status]
 image:https://img.shields.io/badge/License-MIT-blue.svg[License]
@@ -253,6 +255,12 @@ SSE implementation.
 
 MIT License. See `LICENSE` for details. **Note:** Mentioning the author in credits
 is required for any redistribution.
+
+== AI assistance disclosure
+
+This project includes AI-assisted code and documentation.
+The maintainer reviews and tests changes, however the software is provided "as is" and may contain errors.
+Use at your own risk; validate in your environment before production use.
 
 ---
 Created by DBuret. Part of the https://gitlab.com/dburet/pAItrimony[pAItrimony] services suite.

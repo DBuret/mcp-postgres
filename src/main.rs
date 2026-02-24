@@ -157,18 +157,36 @@ fn handle_list_tools() -> Value {
     json!({ "tools": [
         {
             "name": "sql_read_query",
-            "description": "Query the pAItrimony financial database. \
-                Use this tool to answer any question about the user's investment portfolio: \
-                account balances, holdings, historical stock prices (OHLCV), \
-                technical indicators (RSI, SMA, Bollinger Bands), or news sentiment scores. \
-                Input must be a valid SELECT query. \
-                The database schema is: \
-                accounts(id, name, type[PEA|CTO|CRYPTO|SCPI], currency); \
-                holdings(id, account_id, ticker, quantity, avg_price); \
-                assets(ticker, name, type[STOCK|ETF|CRYPTO], sector, industry); \
-                quotes(ticker, date, open, high, low, close, volume); \
-                signals(ticker, date, rsi_14, sma_50, sma_200, bb_upper, bb_lower, atr_14, rvol); \
-                news(id, ticker, date, title, url, summary, sentiment_score[-1..1]).",
+            "description": concat!(
+                "Query the pAItrimony financial database. ",
+                "Use this tool to answer any question about the user's investment portfolio: ",
+                "account balances, holdings, historical stock prices (OHLCV), ",
+                "technical indicators (RSI, SMA, Bollinger Bands), or news sentiment scores. ",
+                "Input must be a valid SELECT query. ",
+                "IMPORTANT: holdings and quotes are linked via 'isin', not 'ticker'. ",
+                "For portfolio queries, prefer using view_portfolio_summary directly. ",
+                "The database schema is: ",
+                "accounts(id, name, type[PEA|CTO|CRYPTO|SCPI], currency, broker); ",
+                "assets(isin, ticker, name, type[STOCK|ETF|CRYPTO], sector, industry, country, currency); ",
+                "holdings(id, account_id, isin, quantity, avg_price, currency); ",
+                "quotes(isin, date, open, high, low, close, adjusted_close, volume); ",
+                "signals(ticker, date, rsi_14, sma_50, sma_200, bb_upper, bb_lower, atr_14); ",
+                "news(id, ticker, date, title, url, summary, sentiment_score[-1..1]); ",
+                "alerts_log(id, ticker, alert_type, message, triggered_at); ",
+                "analyst_ratings(ticker, date, consensus_rating, target_price_avg, analyst_count); ",
+                "corporate_events(id, ticker, event_type, event_date, value, description); ",
+                "portfolio_snapshots(id, account_id, snapshot_date, total_value, daily_pnl, daily_pnl_pct); ",
+                "view_portfolio_summary(account_name, isin, ticker, asset_name, quantity, avg_price, ",
+                "  last_price, quote_date, current_value, unrealized_pnl, pnl_pct). ",
+                "Example — portfolio with latest price: ",
+                "SELECT h.isin, a.ticker, a.name, h.quantity, h.avg_price ",
+                "FROM holdings h ",
+                "JOIN assets a ON h.isin = a.isin ",
+                "JOIN accounts acc ON h.account_id = acc.id; ",
+                "Example — latest quote per asset: ",
+                "SELECT q.isin, q.close, q.date FROM quotes q ",
+                "WHERE q.date = (SELECT MAX(date) FROM quotes WHERE isin = q.isin);"
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -182,21 +200,29 @@ fn handle_list_tools() -> Value {
         },
         {
             "name": "list_tables",
-            "description": "List all tables available in the financial database. \
-                Call this first if you are unsure which tables exist.",
+            "description": concat!(
+                "List all tables and views available in the financial database. ",
+                "Call this first if you are unsure which tables exist."
+            ),
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
         },
         {
             "name": "describe_table",
-            "description": "Get the column definitions of a specific table in the financial database. \
-                Use this before writing a sql_read_query if you need to know \
-                the exact column names and types of a table.",
+            "description": concat!(
+                "Get the column definitions of a specific table or view in the financial database. ",
+                "Use this before writing a sql_read_query if you need to know ",
+                "the exact column names and types. ",
+                "Key tables: quotes, holdings, signals, news, view_portfolio_summary."
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "table": {
                         "type": "string",
-                        "description": "Table name (e.g. 'quotes', 'holdings', 'signals', 'news')"
+                        "description": concat!(
+                            "Table or view name, e.g. 'quotes', 'holdings', ",
+                            "'signals', 'news', 'view_portfolio_summary'"
+                        )
                     }
                 },
                 "required": ["table"]
@@ -204,25 +230,31 @@ fn handle_list_tools() -> Value {
         },
         {
             "name": "portfolio_performance",
-            "description": "Returns the current state of the user's investment portfolio: \
-                all positions across all accounts (PEA, CTO, Crypto, SCPI) \
-                with current market value, cost basis, unrealized profit/loss in currency and percentage. \
-                Use this to answer questions like: \
-                'How is my portfolio doing?', \
-                'What are my best/worst performing positions?', \
-                'What is my total portfolio value?'",
+            "description": concat!(
+                "Returns the current state of the user's investment portfolio: ",
+                "all positions across all accounts (PEA, CTO, Crypto, SCPI) ",
+                "with current market value, cost basis, unrealized profit/loss in currency and percentage. ",
+                "Uses view_portfolio_summary internally (isin-based joins). ",
+                "Use this to answer questions like: ",
+                "'How is my portfolio doing?', ",
+                "'What are my best/worst performing positions?', ",
+                "'What is my total portfolio value?'"
+            ),
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
         },
         {
             "name": "at_risk_positions",
-            "description": "Returns positions that are currently at risk, defined as: \
-                a loss exceeding the drawdown threshold (default: -10%) \
-                OR a negative average news sentiment over the last 7 days (below -0.5). \
-                Also returns RSI and moving averages (SMA50, SMA200) for each flagged position. \
-                Use this to answer questions like: \
-                'What positions should I be worried about?', \
-                'Are there any alerts in my portfolio?', \
-                'Which stocks have bad news sentiment?'",
+            "description": concat!(
+                "Returns positions that are currently at risk, defined as: ",
+                "a loss exceeding the drawdown threshold (default: -10%) ",
+                "OR a negative average news sentiment over the last 7 days (below -0.5). ",
+                "Also returns RSI and moving averages (SMA50, SMA200) for each flagged position. ",
+                "Note: signals are joined via ticker, news via ticker. ",
+                "Use this to answer questions like: ",
+                "'What positions should I be worried about?', ",
+                "'Are there any alerts in my portfolio?', ",
+                "'Which stocks have bad news sentiment?'"
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -236,14 +268,22 @@ fn handle_list_tools() -> Value {
         },
         {
             "name": "sector_exposure",
-            "description": "Returns the user's portfolio allocation broken down by market sector \
-                (Technology, Finance, Energy, etc.): number of positions per sector, \
-                total invested value, and percentage of the total portfolio. \
-                Use this to answer questions like: \
-                'Am I too exposed to Tech?', \
-                'What is my sector diversification?', \
-                'Should I rebalance my portfolio?'",
+            "description": concat!(
+                "Returns the user's portfolio allocation broken down by market sector ",
+                "(Technology, Finance, Energy, etc.): number of positions per sector, ",
+                "total invested value, and percentage of the total portfolio. ",
+                "Joins via isin: holdings → assets. ",
+                "Use this to answer questions like: ",
+                "'Am I too exposed to Tech?', ",
+                "'What is my sector diversification?', ",
+                "'Should I rebalance my portfolio?'"
+            ),
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
         }
     ]})
+}
+
+
+fn json_error(msg: &str) -> Value {
+    json!({ "isError": true, "content": [{ "type": "text", "text": msg }] })
 }

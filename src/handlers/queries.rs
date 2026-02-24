@@ -108,31 +108,11 @@ pub async fn describe_table(state: &AppState, table: &str) -> Result<String, Bri
 #[instrument(skip(state))]
 pub async fn portfolio_performance(state: &AppState) -> Result<String, BridgeError> {
     let sql = "
-        SELECT
-            a.name                                               AS account_name,
-            a.type                                               AS account_type,
-            h.ticker,
-            ast.name                                             AS asset_name,
-            ast.sector,
-            h.quantity,
-            h.avg_price,
-            q.close                                              AS current_price,
-            q.date                                               AS price_date,
-            ROUND((h.quantity * q.close)::numeric, 2)           AS current_value,
-            ROUND((h.quantity * h.avg_price)::numeric, 2)       AS cost_basis,
-            ROUND(((q.close - h.avg_price) * h.quantity)::numeric, 2)
-                                                                 AS unrealized_pnl,
-            ROUND(((q.close - h.avg_price) / h.avg_price * 100)::numeric, 2)
-                                                                 AS pnl_pct
-        FROM holdings h
-        JOIN accounts a   ON h.account_id = a.id
-        JOIN assets   ast ON h.ticker     = ast.ticker
-        JOIN LATERAL (
-            SELECT close, date FROM quotes
-            WHERE ticker = h.ticker
-            ORDER BY date DESC LIMIT 1
-        ) q ON true
-        ORDER BY a.name, pnl_pct ASC
+        SELECT row_to_json(q) AS r FROM (
+            SELECT * FROM view_portfolio_summary
+            ORDER BY account_name, pnl_pct ASC
+            LIMIT 500
+        ) q
     ";
     query_to_json(state, sql).await
 }

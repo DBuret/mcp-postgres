@@ -35,6 +35,7 @@ async fn main() {
         .route("/health", get(|| async { "OK" }))
         .route("/sse", get(sse_handler).post(messages_handler))
         .route("/messages", post(messages_handler))
+        .route("/mcp", post(mcp_handler))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
@@ -286,4 +287,73 @@ fn handle_list_tools() -> Value {
 
 fn json_error(msg: &str) -> Value {
     json!({ "isError": true, "content": [{ "type": "text", "text": msg }] })
+}
+
+async fn mcp_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<McpRequest>,
+) -> impl IntoResponse {
+    let method = payload.method.as_str();
+    let request_id = payload.id.clone().unwrap_or(Value::Null);
+
+    // 1. Initialisation
+    if method == "initialize" {
+        let result = handle_initialize();
+        let response = McpResponse { jsonrpc: "2.0".into(), id: request_id, result };
+        return Json(response).into_response();
+    }
+
+    // 2. Traitement des méthodes (logique similaire à messages_handler mais synchrone)
+    let result = match method {
+        "tools/list" => handle_list_tools(),
+        
+        "tools/call" => {
+            let tool_name = payload.params.as_ref()
+                .and_then(|p| p.get("name")?.as_str())
+                .unwrap_or("");
+            let args = payload.params.as_ref().and_then(|p| p.get("arguments"));
+
+            let res = match tool_name {
+                "sql_read_query" => {
+                    let sql = args.and_then(|a| a.get("sql")?.as_str()).unwrap_or("");
+                    sql_read_query(&state, sql).await
+                }
+                "list_tables" => list_tables(&state).await,
+                "describe_table" => {
+                    let table = args.and_then(|a| a.get("table")?.as_str()).unwrap_or("");
+                    describe_table(&state, table).await
+                }
+                "portfolio_performance" => portfolio_performance(&state).await,
+                "sector_exposure" => sector_exposure(&state).await,
+                "at_risk_positions" => {
+                    let threshold = args
+                        .and_then(|a| a.get("drawdown_threshold")?.as_f64())
+                        .unwrap_or(10.0);
+                    at_risk_positions(&state, threshold).await
+                }
+                _ => Err(crate::error::BridgeError::Api(format!("Unknown tool: {tool_name}"))),
+            };
+
+            match res {
+                Ok(t) => json!({ "content": [{ "type": "text", "text": t }] }),
+                Err(e) => {
+                    error!(error = %e, "Tool call failed");
+                    json_error(&e.to_string())
+                }
+            }
+        },
+
+        "notifications/initialized" => return StatusCode::OK.into_response(),
+
+        _ => json_error(&format!("Method {method} not supported")),
+    };
+
+    // 3. Réponse JSON-RPC 
+    let response = McpResponse {
+        jsonrpc: "2.0".into(),
+        id: request_id,
+        result,
+    };
+    
+    Json(response).into_response()
 }

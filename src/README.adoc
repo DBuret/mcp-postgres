@@ -1,10 +1,9 @@
 = mcp-postgres — Internal Architecture
 :icons: font
-:toc: macro
+:toc: left
 :toc-title: Table of Contents
 :sectnums:
-
-toc::[]
+:source-highlighter: highlight.js
 
 This document describes the internal structure of `mcp-postgres` for contributors and maintainers.
 It is intentionally kept close to the source code.
@@ -13,7 +12,11 @@ It is intentionally kept close to the source code.
 
 `mcp-postgres` follows the same architectural pattern as the other bridges in the pAItrimony suite
 (`mcp-searxng`, `mcp-kroki`): a minimal Axum/Tokio HTTP server exposing the
-https://modelcontextprotocol.io/[Model Context Protocol] over **SSE (Server-Sent Events)**.
+https://modelcontextprotocol.io/[Model Context Protocol] 
+
+It supports two communication patterns:
+1. **Standard HTTP (Synchronous)**: The modern MCP standard using a single `POST /mcp` endpoint.
+2. **SSE (Asynchronous)**: Legacy/Streaming support using `GET /sse` and `POST /messages`.over **SSE (Server-Sent Events)**.
 
 The codebase is deliberately small and flat. There is no framework abstraction, no dependency injection
 container, no ORM. Each file has a single, explicit responsibility.
@@ -35,18 +38,13 @@ src/
 == Module Descriptions
 
 === `main.rs`
-Entry point and nerve center of the bridge.
+The nerve center of the bridge. It handles two types of request-response cycles:
 
-* Initialises `tracing` logging (level controlled via `MCP_PG_LOG`).
-* Builds the `AppState` (async, connects the PgPool).
-* Mounts three routes:
-** `GET /health` — liveness probe for Nomad service checks.
-** `GET /sse` — opens the Server-Sent Events tunnel (long-lived connection).
-** `POST /sse` and `POST /messages` — receives MCP JSON-RPC requests from the client.
-* Implements the **Hybrid Initialize** strategy: the `initialize` handshake is answered
-  directly via HTTP 200 (not via SSE) to avoid LM Studio's 60s connection timeout.
-* All other tool calls are processed in a `tokio::spawn` task and delivered asynchronously
-  via the SSE broadcast channel, with up to 3 retries spaced 100ms apart.
+* **Routes:**
+** `GET /health` — Liveness probe.
+** `POST /mcp` — **[New]** Standard synchronous MCP endpoint. Best for most clients.
+** `GET /sse` — Opens the SSE stream for asynchronous responses.
+** `POST /messages` — Trigger point for the SSE flow.
 
 === `state.rs`
 Holds the two shared resources injected into every handler via `Arc<AppState>`:
@@ -101,7 +99,10 @@ All tool implementations live here, split into two groups.
   to prevent injection via the `information_schema` path.
 |===
 
-==== Financial tools
+==== Financial tools 
+
+NOTE: specific to my pAItrimony project
+
 [cols="1,3"]
 |===
 | Function | Role
@@ -125,39 +126,33 @@ All tool implementations live here, split into two groups.
 All financial tools delegate to this internal function to avoid duplicating
 the `row_to_json` wrapping and the 500-row truncation logic.
 
-== Data Flow
+== Communication Flow
+
+The server now provides a dual-stack entry point to ensure compatibility with all MCP clients.
 
 [plantuml]
 ----
 @startuml
+participant "MCP Client (e.g. Claude)" as LMS
+participant "Axum Router" as AR
+participant "Handlers" as H
+database "PostgreSQL" as PG
 
-!theme plain
-skinparam sequenceArrowThickness 2
+== Standard Flow (v0.2.0+) ==
+LMS -> AR : POST /mcp (JSON-RPC)
+AR  -> H  : mcp_handler (sync)
+H   -> PG : SQL Query
+PG  -> H  : Rows
+H   -> LMS: HTTP 200 (McpResponse)
 
-actor       "LM Studio\n(Desktop)"   as LMS
-participant "messages_handler()\nmain.rs" as MH
-participant "tokio::spawn\n(async task)" as TS
-participant "queries.rs\nhandler"    as QH
-database    "PostgreSQL\n(NAS)"      as PG
-participant "broadcast::Sender\n(SSE channel)" as SSE
-actor       "GET /sse\ntunnel"       as SSET
-
-== Initialization (direct HTTP) ==
-LMS -> MH  : POST /sse\n{"method": "initialize"}
-MH  -> LMS : HTTP 200\nMcpResponse (direct)
-
-== Tool Call (async via SSE) ==
-LMS -> MH  : POST /sse\n{"method": "tools/call",\n"name": "at_risk_positions"}
-MH  -> TS  : tokio::spawn
-MH  -> LMS : HTTP 202 Accepted
-
-TS  -> QH  : at_risk_positions(&state, 10.0)
-QH  -> PG  : SELECT ... FROM holdings\nJOIN quotes, news, signals
-PG  -> QH  : rows
-QH  -> TS  : Ok(json_string)
-TS  -> SSE : broadcast::send(McpResponse)
-SSE -> SSET: SSE event
-SSET-> LMS : McpResponse\n(JSON-RPC result)
+== Legacy Flow (SSE) ==
+LMS -> AR : GET /sse (Establish Stream)
+LMS -> AR : POST /messages (Task Trigger)
+AR  -> H  : messages_handler (spawn task)
+AR  -> LMS: HTTP 202 Accepted
+H   -> PG : SQL Query
+H   -> AR : Broadcast Result
+AR  -> LMS: SSE Event (McpResponse)
 @enduml
 ----
 
@@ -178,3 +173,20 @@ SSET-> LMS : McpResponse\n(JSON-RPC result)
   in `sql_read_query` rejects writes at the application layer, providing a clear
   error message to the LLM. The database user should *also* be a read-only role
   in production (defence in depth, ADR-001).
+
+== Curl test (synchronous)
+
+[source,bash]
+----
+curl -X POST http://localhost:3000/mcp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": "1",
+    "method": "tools/call",
+    "params": {
+      "name": "list_tables",
+      "arguments": {}
+    }
+  }'
+----

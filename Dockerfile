@@ -27,7 +27,7 @@ LABEL org.opencontainers.image.url="https://github.com/DBuret/mcp-postgres"
 LABEL org.opencontainers.image.source="https://github.com/DBuret/mcp-postgres"
 LABEL org.opencontainers.image.documentation="https://github.com/DBuret/mcp-postgres/blob/main/README.adoc"
 
-LABEL org.opencontainers.image.version="0.1.0"
+LABEL org.opencontainers.image.version="0.2.0"
 LABEL org.opencontainers.image.revision="HEAD"
 LABEL org.opencontainers.image.licenses="MIT"
 

@@ -20,7 +20,10 @@ image:https://img.shields.io/badge/License-MIT-blue.svg[License]
 |image:logo-128.png[logo]
 |An implementation of the **Model Context Protocol (MCP)** that gives AI agents read-only access to a PostgreSQL database, with built-in financial analytics tools. Built with Rust for speed, reliability & minimal footprint.
 
-Unlike standard MCP servers using `stdio`, this bridge operates over **SSE (Server-Sent Events)** with a **Hybrid Response** mode, making it compatible with local clients like LM Studio.
+Unlike standard MCP servers using `stdio`, this bridge operates over the network:
+
+* **SSE (Server-Sent Events)** with a **Hybrid Response** mode, making it compatible with  clients like LM Studio.
+* **Standard HTTP (Synchronous)**: The modern MCP standard using a single `POST /mcp` endpoint. Open WebUI needs this
 |===
 
 toc::[]
